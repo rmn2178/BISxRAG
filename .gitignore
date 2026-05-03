@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.pkl
+*.pyc
+data/chroma_db/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+node_modules/
+.DS_Store
+Thumbs.db
