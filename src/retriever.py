@@ -104,7 +104,7 @@ class QueryPreprocessor:
         r"Grade\s*\d+",
     ]
 
-    IS_NUMBER_PATTERN = re.compile(r"\bIS\s+\d{1,5}\b", re.IGNORECASE)
+    IS_NUMBER_PATTERN = re.compile(r"\bIS\s+\d{1,5}(?:\s*\(\s*Part\s+\d+\s*\))?(?:\s*:\s*\d{4})?\b", re.IGNORECASE)
 
     def preprocess(self, query: str) -> Dict[str, Any]:
         """Full query preprocessing: expansion, detection, extraction."""
@@ -515,6 +515,7 @@ class HyDERescue:
                 generation_config={"temperature": 0.3, "max_output_tokens": 200},
             )
             hypothetical_text = response.text.strip()
+
             logger.info(f"HyDE generated: {hypothetical_text[:100]}...")
 
             # Embed the hypothetical document

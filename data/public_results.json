@@ -6,9 +6,11 @@
       "IS 269: 1989"
     ],
     "retrieved_standards": [
-      "IS 269"
+      "IS 269 : 1989",
+      "IS 8112 : 1989",
+      "IS 269:1989"
     ],
-    "latency_seconds": 9.463
+    "latency_seconds": 7.9757
   },
   {
     "id": "PUB-02",
@@ -17,11 +19,11 @@
       "IS 383: 1970"
     ],
     "retrieved_standards": [
-      "IS 383",
-      "IS 4021",
-      "IS 3068"
+      "IS 383 : 1970",
+      "IS 383:1970",
+      "IS 1195 : 2002"
     ],
-    "latency_seconds": 11.7773
+    "latency_seconds": 8.9217
   },
   {
     "id": "PUB-03",
@@ -30,9 +32,9 @@
       "IS 458: 2003"
     ],
     "retrieved_standards": [
-      "IS 458"
+      "IS 458 : 2003"
     ],
-    "latency_seconds": 11.0205
+    "latency_seconds": 6.2099
   },
   {
     "id": "PUB-04",
@@ -41,11 +43,11 @@
       "IS 2185 (Part 2): 1983"
     ],
     "retrieved_standards": [
-      "IS 2185",
       "IS 2185 (Part 2)",
-      "IS 2185 (Part 1)"
+      "IS 2185",
+      "IS 2185 (Part 2):1983"
     ],
-    "latency_seconds": 11.639
+    "latency_seconds": 7.9972
   },
   {
     "id": "PUB-05",
@@ -54,11 +56,11 @@
       "IS 459: 1992"
     ],
     "retrieved_standards": [
-      "IS 459",
-      "IS 13008",
-      "IS 10388"
+      "IS 14871 : 2000",
+      "IS 459:1992",
+      "IS 459 : 1992"
     ],
-    "latency_seconds": 6.7749
+    "latency_seconds": 3.1073
   },
   {
     "id": "PUB-06",
@@ -67,11 +69,11 @@
       "IS 455: 1989"
     ],
     "retrieved_standards": [
-      "IS 12089",
-      "IS 8112",
-      "IS 455"
+      "IS 12089:1987",
+      "IS 8112 : 1989",
+      "IS 455 : 1989"
     ],
-    "latency_seconds": 3.1283
+    "latency_seconds": 3.2896
   },
   {
     "id": "PUB-07",
@@ -80,11 +82,11 @@
       "IS 1489 (Part 2): 1991"
     ],
     "retrieved_standards": [
-      "IS 1489(Part 2)",
       "IS 1489",
+      "IS 1489(Part 2):1991",
       "IS 1489 (Part 1)"
     ],
-    "latency_seconds": 3.2572
+    "latency_seconds": 3.2123
   },
   {
     "id": "PUB-08",
@@ -93,11 +95,11 @@
       "IS 3466: 1988"
     ],
     "retrieved_standards": [
-      "IS 3466",
-      "IS 9142",
-      "IS 2250"
+      "IS 3466 : 1988",
+      "IS 8273:1984",
+      "IS 2116:1980"
     ],
-    "latency_seconds": 3.1573
+    "latency_seconds": 5.2865
   },
   {
     "id": "PUB-09",
@@ -106,11 +108,11 @@
       "IS 6909: 1990"
     ],
     "retrieved_standards": [
-      "IS 6909",
+      "IS 6909 : 1990",
       "IS 6441",
-      "IS 5724"
+      "IS 10175 (Part 1) :1993"
     ],
-    "latency_seconds": 3.1216
+    "latency_seconds": 3.1449
   },
   {
     "id": "PUB-10",
@@ -119,10 +121,10 @@
       "IS 8042: 1989"
     ],
     "retrieved_standards": [
-      "IS 8042",
-      "IS 8112",
-      "IS 8043"
+      "IS 8042 : 1989",
+      "IS 269: 1989",
+      "IS 8043 : 1991"
     ],
-    "latency_seconds": 2.9973
+    "latency_seconds": 3.1876
   }
 ]
