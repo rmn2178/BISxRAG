@@ -147,6 +147,8 @@ def main():
 
         output_item = {
             "id": query_id,
+            "query": query_text,
+            "expected_standards": item.get("expected_standards", []),
             "retrieved_standards": result["retrieved_standards"],
             "latency_seconds": result["latency_seconds"],
         }
