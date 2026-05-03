@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Hallucination-Safe Claude Standards Generator
+Hallucination-Safe Gemini Standards Generator
 ================================================
-Generates BIS standard recommendations using Claude with strict guardrails.
+Generates BIS standard recommendations using Gemini with strict guardrails.
 Implements whitelist validation and deterministic fallbacks.
 """
 
@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import anthropic
+import google.generativeai as genai
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -61,14 +61,19 @@ class StandardsGenerator:
     """
 
     def __init__(self):
-        self.api_key = os.getenv("ANTHROPIC_API_KEY")
+        api_key = os.getenv("GEMINI_API_KEY")
         self.client = None
 
-        if self.api_key:
-            self.client = anthropic.Anthropic(api_key=self.api_key)
-            logger.info("Claude API client initialized")
+        if api_key:
+            genai.configure(api_key=api_key)
+            self.client = genai.GenerativeModel(
+                model_name="gemini-2.5-flash",
+                system_instruction=SYSTEM_PROMPT,
+                generation_config={"temperature": 0.0, "max_output_tokens": 1000},
+            )
+            logger.info("Gemini API client initialized")
         else:
-            logger.warning("No ANTHROPIC_API_KEY — generator will use fallback mode")
+            logger.warning("No GEMINI_API_KEY — generator will use fallback mode")
 
         # Load whitelist at startup
         self.whitelist = set()
@@ -111,13 +116,13 @@ class StandardsGenerator:
         # ── Call Claude ──
         if self.client:
             try:
-                recommendations = self._call_claude(query, context)
+                recommendations = self._call_gemini(query, context)
                 if recommendations is not None:
                     # Post-process: whitelist validation
                     clean_recs = self._validate_whitelist(recommendations, query)
                     return clean_recs
             except Exception as e:
-                logger.error(f"Claude generation failed: {e}")
+                logger.error(f"Gemini generation failed: {e}")
 
         # ── Deterministic fallback ──
         logger.info("Using deterministic fallback for recommendations")
@@ -163,21 +168,14 @@ class StandardsGenerator:
 
         return "\n".join(context_parts)
 
-    def _call_claude(
+    def _call_gemini(
         self, query: str, context: str
     ) -> Optional[List[Dict[str, Any]]]:
-        """Call Claude API and parse the response."""
+        """Call Gemini API and parse the response."""
         user_prompt = USER_PROMPT_TEMPLATE.format(query=query, context=context)
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1000,
-            temperature=0.0,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-
-        raw_text = response.content[0].text.strip()
+        response = self.client.generate_content(user_prompt)
+        raw_text = response.text.strip()
 
         # Parse JSON from response
         try:
@@ -189,7 +187,7 @@ class StandardsGenerator:
             if json_match:
                 parsed = json.loads(json_match.group())
             else:
-                logger.error(f"Failed to parse Claude response: {raw_text[:200]}")
+                logger.error(f"Failed to parse Gemini response: {raw_text[:200]}")
                 return None
 
         recommendations = parsed.get("recommendations", [])

@@ -21,6 +21,8 @@ import argparse
 import json
 import logging
 import os
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
 import sys
 import time
 import traceback
@@ -30,8 +32,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-assert os.getenv("ANTHROPIC_API_KEY"), (
-    "ANTHROPIC_API_KEY not set. Copy .env.example to .env and fill in your key."
+assert os.getenv("GEMINI_API_KEY"), (
+    "GEMINI_API_KEY not set. Copy .env.example to .env and fill in your key."
 )
 
 from src.retriever import HybridRetriever

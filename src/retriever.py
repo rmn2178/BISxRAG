@@ -16,11 +16,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import anthropic
+import google.generativeai as genai
+import requests
 import chromadb
 import numpy as np
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
@@ -30,7 +30,22 @@ CHROMA_DIR = DATA_DIR / "chroma_db"
 BM25_PATH = DATA_DIR / "bm25_index.pkl"
 WHITELIST_PATH = DATA_DIR / "standard_whitelist.json"
 
-EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_EMBED_MODEL = "nomic-embed-text:v1.5"
+
+class OllamaEmbedder:
+    def encode(self, texts, **kwargs):
+        if isinstance(texts, str):
+            texts = [texts]
+        url = f"{OLLAMA_URL}/api/embed"
+        payload = {"model": OLLAMA_EMBED_MODEL, "input": texts}
+        try:
+            resp = requests.post(url, json=payload, timeout=30)
+            resp.raise_for_status()
+            return np.array(resp.json()["embeddings"])
+        except Exception as e:
+            logger.error(f"Ollama embed failed: {e}")
+            return np.zeros((len(texts), 768))
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +192,7 @@ class HybridRetriever:
         logger.info("Initializing HybridRetriever...")
 
         # Load embedder
-        self.embedder = SentenceTransformer(EMBED_MODEL)
+        self.embedder = OllamaEmbedder()
 
         # Load ChromaDB
         self.chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
@@ -466,16 +481,17 @@ class HyDERescue:
 
     def __init__(
         self,
-        embedder: SentenceTransformer,
+        embedder: OllamaEmbedder,
         text_collection: chromadb.Collection,
     ):
         self.embedder = embedder
         self.text_collection = text_collection
         self.client = None
 
-        api_key = os.getenv("ANTHROPIC_API_KEY")
+        api_key = os.getenv("GEMINI_API_KEY")
         if api_key:
-            self.client = anthropic.Anthropic(api_key=api_key)
+            genai.configure(api_key=api_key)
+            self.client = genai.GenerativeModel("gemini-2.5-flash")
 
     def rescue(
         self, query: str, existing_candidates: List[Dict[str, Any]]
@@ -489,20 +505,16 @@ class HyDERescue:
             return []
 
         try:
-            response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=200,
-                temperature=0.3,
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        f"Write a 2-sentence BIS SP21 standard summary that would match "
-                        f"this product description: {query}\n"
-                        f"Return only the summary text, nothing else."
-                    ),
-                }],
+            prompt = (
+                f"Write a 2-sentence BIS SP21 standard summary that would match "
+                f"this product description: {query}\n"
+                f"Return only the summary text, nothing else."
             )
-            hypothetical_text = response.content[0].text.strip()
+            response = self.client.generate_content(
+                prompt,
+                generation_config={"temperature": 0.3, "max_output_tokens": 200},
+            )
+            hypothetical_text = response.text.strip()
             logger.info(f"HyDE generated: {hypothetical_text[:100]}...")
 
             # Embed the hypothetical document
