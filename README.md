@@ -72,7 +72,10 @@ GEMINI_API_KEY=your_gemini_key
 GROQ_API_KEY=your_groq_key
 ```
 
-### 3. Run Inference
+### 3. Immediate Evaluation (Pre-built Indexes)
+**Note:** To save evaluation time, the **ChromaDB vector database** and **BM25 index** are pre-built and included in the `data/` directory. You can run inference immediately without re-vectorizing the PDF.
+
+### 4. Run Inference
 Process the hidden dataset with the optimized pipeline:
 ```bash
 python inference.py --input private_dataset.json --output team_results.json
