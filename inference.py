@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 # Import local modules
-from src.retriever import HybridRetriever, GroqLLM
+from src.retriever import HybridRetriever
 
 # Setup logging
 logging.basicConfig(
@@ -40,10 +40,6 @@ class BISInferenceEngine:
     def __init__(self):
         logger.info("Initializing BIS Inference Engine...")
         self.retriever = HybridRetriever()
-        self.llm = GroqLLM()
-        
-        # Whitelist is already loaded in retriever, but we'll use it for the final check
-        self.whitelist = self.retriever.whitelist
         
     def process_query(self, query: str) -> Dict[str, Any]:
         """Process a single query through the RAG pipeline."""
@@ -56,57 +52,13 @@ class BISInferenceEngine:
         if not candidates:
             logger.warning(f"No candidates found for query: {query[:50]}")
             return {
-                "expected_standards": [],
                 "retrieved_standards": [],
                 "latency_seconds": round(time.time() - start_time, 2)
             }
             
-        # 2. Prepare context for LLM
-        context_parts = []
-        for i, c in enumerate(candidates[:3]):
-            context_parts.append(
-                f"[{i+1}] {c['standard_number']}: {c['title']}\n"
-                f"Scope: {c['scope_text'][:150]}...\n"
-            )
-        context = "\n".join(context_parts)
-        
-        # 3. Generate recommendation using Groq
-        system_prompt = "BIS Officer. Use context only. Output JSON: {'recommendations': [str], 'reasoning': str}"
-        
-        prompt = f"Query: {query}\n\nContext:\n{context}\n\nJSON output:"
-        
-        llm_response = self.llm.generate(prompt, system_prompt=system_prompt)
-        
-        # 4. Parse LLM response and apply Deterministic Whitelist Check
-        try:
-            # Try to find JSON in the response
-            start = llm_response.find("{")
-            end = llm_response.rfind("}") + 1
-            if start != -1 and end != -1:
-                data = json.loads(llm_response[start:end])
-                raw_recs = data.get("recommendations", [])
-            else:
-                raw_recs = [c["standard_number"] for c in candidates[:2]]
-        except Exception as e:
-            logger.error(f"Failed to parse LLM response: {e}")
-            raw_recs = [c["standard_number"] for c in candidates[:2]]
-
-        # THE CRITICAL STEP: Whitelist Filter (0% Hallucination Guarantee)
-        final_recs = []
-        for rec in raw_recs:
-            if rec in self.whitelist:
-                final_recs.append(rec)
-            else:
-                logger.warning(f"HALLUCINATION DETECTED: LLM suggested {rec} which is not in whitelist. Filtered.")
-
-        # Ensure we return at least one valid recommendation if we have candidates
-        if not final_recs and candidates:
-            final_recs = [candidates[0]["standard_number"]]
-
         latency = round(time.time() - start_time, 2)
 
         return {
-            "expected_standards": final_recs,
             "retrieved_standards": [c["standard_number"] for c in candidates[:5]],
             "latency_seconds": latency
         }
@@ -115,6 +67,11 @@ def main():
     parser = argparse.ArgumentParser(description="BIS Standards Inference Pipeline")
     parser.add_argument("--input", required=True, help="Path to input JSON dataset")
     parser.add_argument("--output", required=True, help="Path to save results")
+    parser.add_argument(
+        "--public-output",
+        action="store_true",
+        help="Include query and expected_standards in output (for public test set).",
+    )
     args = parser.parse_args()
     
     input_path = Path(args.input)
@@ -155,14 +112,16 @@ def main():
         # Construct final object in specific order requested by user
         final_item = {
             "id": query_id,
-            "query": query_text,
-            "expected_standards": result["expected_standards"],
             "retrieved_standards": result["retrieved_standards"],
-            "latency_seconds": result["latency_seconds"]
+            "latency_seconds": result["latency_seconds"],
         }
+        if args.public_output:
+            final_item["query"] = query_text
+            if "expected_standards" in item:
+                final_item["expected_standards"] = item.get("expected_standards", [])
         results.append(final_item)
-        
-        # Controlled pacing to avoid Groq 429 Rate Limits
+
+        # Controlled pacing to avoid Groq/Gemini API rate limits
         time.sleep(0.3)
         
     end_time = time.time()

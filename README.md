@@ -81,6 +81,23 @@ Process the hidden dataset with the optimized pipeline:
 python inference.py --input private_dataset.json --output team_results.json
 ```
 
+Note: The judge output JSON strictly follows the required schema (id, retrieved_standards, latency_seconds).
+Rationales are shown in the UI/demo output only.
+
+### 5. Presentation Deck
+Include your 8-slide deck at the repo root as `presentation.pdf` for submission.
+
+---
+
+## ✅ Submission Checklist
+- `inference.py` at repo root and runnable via `python inference.py --input ... --output ...`
+- `eval_script.py` at repo root
+- `requirements.txt` with all dependencies
+- `/src` application code
+- `/data` outputs and indexes
+- `presentation.pdf` at repo root
+- Recorded demo (<= 7 minutes)
+
 ---
 
 ## 🏆 Key Innovations summary

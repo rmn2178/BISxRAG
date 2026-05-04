@@ -120,13 +120,55 @@ class StandardsGenerator:
                 if recommendations is not None:
                     # Post-process: whitelist validation
                     clean_recs = self._validate_whitelist(recommendations, query)
-                    return clean_recs
+                    return self._finalize_recommendations(clean_recs, candidates)
             except Exception as e:
                 logger.error(f"Gemini generation failed: {e}")
 
         # ── Deterministic fallback ──
         logger.info("Using deterministic fallback for recommendations")
-        return self._deterministic_fallback(candidates)
+        return self._finalize_recommendations(
+            self._deterministic_fallback(candidates),
+            candidates,
+        )
+
+    def _finalize_recommendations(
+        self,
+        recommendations: List[Dict[str, Any]],
+        candidates: List[Dict[str, Any]],
+        min_count: int = 3,
+        max_count: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Ensure 3-5 recommendations with a brief rationale for demo/UX."""
+        final = []
+        seen = set()
+
+        for rec in recommendations:
+            sn = rec.get("standard_number", "").strip()
+            if not sn or sn in seen:
+                continue
+            if not rec.get("rationale"):
+                rec["rationale"] = "Applicable based on scope and material alignment."
+            final.append(rec)
+            seen.add(sn)
+            if len(final) >= max_count:
+                return final
+
+        for c in candidates:
+            if len(final) >= min_count:
+                break
+            sn = c.get("standard_number", "").strip()
+            if not sn or sn in seen:
+                continue
+            final.append({
+                "standard_number": sn,
+                "title": c.get("title", ""),
+                "rationale": (
+                    "Relevant to the product based on scope and category match."
+                ),
+            })
+            seen.add(sn)
+
+        return final[:max_count]
 
     def _format_context(
         self, candidates: List[Dict[str, Any]], max_tokens: int = 1500

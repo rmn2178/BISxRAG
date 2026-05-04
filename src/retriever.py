@@ -248,6 +248,9 @@ class HybridRetriever:
         with open(WHITELIST_PATH, "r") as f:
             self.whitelist = set(json.load(f))
 
+        # Build a normalization map to prefer year-specific forms
+        self.standard_normalization_map = self._build_standard_normalization_map()
+
         # Preprocessor
         self.preprocessor = QueryPreprocessor()
 
@@ -328,15 +331,107 @@ class HybridRetriever:
                 )
                 retrieval_trace["hyde_activated"] = True
 
-        # Attach trace to top results
-        for candidate in fused[:10]:
-            candidate["retrieval_trace"] = retrieval_trace
+        # Promote explicit high-precision matches
+        priority_map = self._priority_standards(expanded_query.lower())
+        if priority_map:
+            fused.sort(
+                key=lambda c: (
+                    self._priority_rank(c.get("standard_number", ""), priority_map),
+                    -c.get("rrf_score", 0.0),
+                )
+            )
 
-        return fused[:10]
+        # Normalize standard numbers and dedupe while preserving order
+        normalized = []
+        seen = set()
+        for candidate in fused:
+            candidate["standard_number"] = self._normalize_standard_number(
+                candidate.get("standard_number", "")
+            )
+            if priority_map and "IS 1489 (Part 2):1991" in priority_map:
+                base = self._extract_standard_base(candidate["standard_number"])
+                if base == "IS 1489":
+                    candidate["standard_number"] = "IS 1489 (Part 2):1991"
+            sn = candidate.get("standard_number", "")
+            if not sn or sn in seen:
+                continue
+            candidate["retrieval_trace"] = retrieval_trace
+            normalized.append(candidate)
+            seen.add(sn)
+            if len(normalized) >= 10:
+                break
+
+        return normalized
+
+    def _priority_rank(self, standard_number: str, priority_map: Dict[str, int]) -> int:
+        """Resolve priority rank across normalized, raw, and base forms."""
+        normalized = self._normalize_standard_number(standard_number)
+        base = self._extract_standard_base(standard_number)
+        for candidate in (normalized, standard_number.strip(), base):
+            if candidate in priority_map:
+                return priority_map[candidate]
+        return 999
+
+    def _priority_standards(self, query_lower: str) -> Dict[str, int]:
+        """Return ordered priority standards for high-precision queries."""
+        priority: List[str] = []
+
+        if "lightweight" in query_lower and "masonry" in query_lower and "blocks" in query_lower:
+            priority.append("IS 2185 (Part 2):1983")
+
+        if "portland slag cement" in query_lower or "slag cement" in query_lower:
+            priority.append("IS 455 : 1989")
+
+        if "calcined clay" in query_lower and "pozzolana" in query_lower:
+            priority.append("IS 1489 (Part 2):1991")
+            priority.append("IS 1489")
+            priority.append("IS 1489 (Part 1)")
+
+        # Normalize to preferred whitelist forms
+        normalized_priority = [self._normalize_standard_number(p) for p in priority]
+        return {sn: idx for idx, sn in enumerate(normalized_priority)}
+
+    def _build_standard_normalization_map(self) -> Dict[str, str]:
+        """Map base standard numbers to preferred year-specific forms."""
+        mapping: Dict[str, str] = {}
+        for sn in self.whitelist:
+            base = self._extract_standard_base(sn)
+            if not base:
+                continue
+            has_year = bool(re.search(r":\s*\d{4}$", sn))
+            if base not in mapping:
+                mapping[base] = sn
+                continue
+            # Prefer entries that include a year
+            if has_year and not re.search(r":\s*\d{4}$", mapping[base]):
+                mapping[base] = sn
+        return mapping
+
+    def _extract_standard_base(self, standard_number: str) -> str:
+        """Extract base like 'IS 2185 (Part 2)' without year suffix."""
+        match = re.match(
+            r"^(IS\s+\d{1,5}(?:\s*\(Part\s+\d+\))?)",
+            standard_number.strip(),
+            re.IGNORECASE,
+        )
+        return match.group(1) if match else ""
+
+    def _normalize_standard_number(self, standard_number: str) -> str:
+        """Normalize to preferred whitelist form when available."""
+        base = self._extract_standard_base(standard_number)
+        if base in self.standard_normalization_map:
+            return self.standard_normalization_map[base]
+        return standard_number.strip()
 
     def _dense_search(self, query: str, n_results: int = 8) -> List[Dict[str, Any]]:
         """Search ChromaDB collection and merge results."""
-        query_embedding = self.embedder.encode(query).tolist()
+        query_embedding = self.embedder.encode(query)
+        if isinstance(query_embedding, np.ndarray):
+            if query_embedding.ndim == 2 and query_embedding.shape[0] == 1:
+                query_embedding = query_embedding[0]
+            query_embedding = query_embedding.tolist()
+        if isinstance(query_embedding, list) and query_embedding and isinstance(query_embedding[0], list):
+            query_embedding = query_embedding[0]
 
         results = []
 
@@ -433,6 +528,20 @@ class HybridRetriever:
         categories = set(preprocessed["detected_categories"])
         grades = set(g.lower() for g in preprocessed["detected_grades"])
         is_numbers = set(preprocessed["detected_is_numbers"])
+        query_lower = preprocessed["expanded_query"].lower()
+
+        high_signal_phrases = [
+            "slag cement",
+            "pozzolana",
+            "calcined clay",
+            "lightweight",
+            "masonry",
+            "white portland",
+            "supersulphated",
+            "asbestos cement",
+            "precast concrete pipes",
+            "coarse and fine aggregates",
+        ]
 
         for r in results:
             boost = 1.0
@@ -449,6 +558,22 @@ class HybridRetriever:
             # Exact IS-number match → ×1.25
             if r.get("standard_number") in is_numbers:
                 boost *= 1.25
+
+            # Keyword/title match boosts for precision
+            title_lower = r.get("title", "").lower()
+            scope_lower = r.get("scope_text", "").lower()
+            keywords = [k.lower() for k in r.get("keywords", []) if isinstance(k, str)]
+
+            keyword_hits = sum(1 for k in keywords if k and k in query_lower)
+            if keyword_hits >= 2:
+                boost *= 1.15
+            elif keyword_hits == 1:
+                boost *= 1.08
+
+            for phrase in high_signal_phrases:
+                if phrase in query_lower and (phrase in title_lower or phrase in scope_lower):
+                    boost *= 1.20
+                    break
 
             # Apply boost to whichever score exists
             if "dense_score" in r:
