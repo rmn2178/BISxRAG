@@ -14,7 +14,7 @@ from sentence_transformers import CrossEncoder
 logger = logging.getLogger(__name__)
 
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-LATENCY_BUDGET = 3.5  # seconds
+LATENCY_BUDGET = 1.0  # seconds
 
 
 class LatencyAwareReranker:

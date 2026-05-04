@@ -47,6 +47,7 @@ class BISInferenceEngine:
         
     def process_query(self, query: str) -> Dict[str, Any]:
         """Process a single query through the RAG pipeline."""
+        start_time = time.time()
         logger.info(f"Processing query: {query[:100]}...")
         
         # 1. Retrieve candidates
@@ -55,41 +56,24 @@ class BISInferenceEngine:
         if not candidates:
             logger.warning(f"No candidates found for query: {query[:50]}")
             return {
-                "recommendations": [],
-                "reasoning": "No relevant BIS standards found for the given description.",
-                "retrieved_standards": []
+                "expected_standards": [],
+                "retrieved_standards": [],
+                "latency_seconds": round(time.time() - start_time, 2)
             }
             
         # 2. Prepare context for LLM
         context_parts = []
-        for i, c in enumerate(candidates[:5]):
+        for i, c in enumerate(candidates[:3]):
             context_parts.append(
                 f"[{i+1}] {c['standard_number']}: {c['title']}\n"
-                f"Category: {c['material_category']}\n"
-                f"Scope: {c['scope_text'][:400]}...\n"
-                f"Grades: {', '.join(c['grades'])}\n"
+                f"Scope: {c['scope_text'][:150]}...\n"
             )
         context = "\n".join(context_parts)
         
         # 3. Generate recommendation using Groq
-        system_prompt = (
-            "You are a highly specialized BIS Compliance Officer. "
-            "Your task is to recommend the most relevant BIS standards (Indian Standards) "
-            "based ONLY on the provided context. "
-            "Rules:\n"
-            "1. Recommend ONLY standards that exist in the context.\n"
-            "2. For each recommendation, provide a brief technical justification.\n"
-            "3. If a specific grade (like Fe 500 or M20) is mentioned, ensure the standard covers it.\n"
-            "4. Format your output as a JSON object with 'recommendations' (list of standard numbers) "
-            "and 'reasoning' (string explaining the choices)."
-        )
+        system_prompt = "BIS Officer. Use context only. Output JSON: {'recommendations': [str], 'reasoning': str}"
         
-        prompt = (
-            f"User Query: {query}\n\n"
-            f"Relevant BIS Standards Context:\n{context}\n\n"
-            f"Based on the context, which BIS standards should be used? "
-            f"Provide your answer in JSON format."
-        )
+        prompt = f"Query: {query}\n\nContext:\n{context}\n\nJSON output:"
         
         llm_response = self.llm.generate(prompt, system_prompt=system_prompt)
         
@@ -101,14 +85,11 @@ class BISInferenceEngine:
             if start != -1 and end != -1:
                 data = json.loads(llm_response[start:end])
                 raw_recs = data.get("recommendations", [])
-                reasoning = data.get("reasoning", "")
             else:
                 raw_recs = [c["standard_number"] for c in candidates[:2]]
-                reasoning = "Deterministic fallback due to parsing error."
         except Exception as e:
             logger.error(f"Failed to parse LLM response: {e}")
             raw_recs = [c["standard_number"] for c in candidates[:2]]
-            reasoning = "Deterministic fallback due to error."
 
         # THE CRITICAL STEP: Whitelist Filter (0% Hallucination Guarantee)
         final_recs = []
@@ -121,12 +102,13 @@ class BISInferenceEngine:
         # Ensure we return at least one valid recommendation if we have candidates
         if not final_recs and candidates:
             final_recs = [candidates[0]["standard_number"]]
-            reasoning += " (Fallback to top retrieved candidate to ensure validity)"
+
+        latency = round(time.time() - start_time, 2)
 
         return {
-            "recommendations": final_recs,
-            "reasoning": reasoning,
-            "retrieved_standards": [c["standard_number"] for c in candidates[:5]]
+            "expected_standards": final_recs,
+            "retrieved_standards": [c["standard_number"] for c in candidates[:5]],
+            "latency_seconds": latency
         }
 
 def main():
@@ -169,9 +151,19 @@ def main():
             continue
             
         result = engine.process_query(query_text)
-        result["id"] = query_id
-        result["query"] = query_text
-        results.append(result)
+        
+        # Construct final object in specific order requested by user
+        final_item = {
+            "id": query_id,
+            "query": query_text,
+            "expected_standards": result["expected_standards"],
+            "retrieved_standards": result["retrieved_standards"],
+            "latency_seconds": result["latency_seconds"]
+        }
+        results.append(final_item)
+        
+        # Controlled pacing to avoid Groq 429 Rate Limits
+        time.sleep(0.3)
         
     end_time = time.time()
     duration = end_time - start_time

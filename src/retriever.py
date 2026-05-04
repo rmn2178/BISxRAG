@@ -32,63 +32,35 @@ BM25_PATH = DATA_DIR / "bm25_index.pkl"
 WHITELIST_PATH = DATA_DIR / "standard_whitelist.json"
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GEMINI_KEYS = [k for k in [os.getenv("GEMINI_API_KEY_1"), os.getenv("GEMINI_API_KEY_2")] if k]
-if not GEMINI_KEYS and os.getenv("GEMINI_API_KEY"):
-    GEMINI_KEYS = [os.getenv("GEMINI_API_KEY")]
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 EMBED_MODEL = "models/gemini-embedding-2"
 
 class GeminiEmbedder:
     def __init__(self):
-        self.keys = GEMINI_KEYS
-        self.current_idx = 0
-        self._configure_current()
-
-    def _configure_current(self):
-        if self.keys:
-            genai.configure(api_key=self.keys[self.current_idx])
-            logging.getLogger(__name__).info(f"Configured Gemini with key index {self.current_idx}")
-
-    def rotate(self):
-        if len(self.keys) > 1:
-            self.current_idx = (self.current_idx + 1) % len(self.keys)
-            self._configure_current()
+        if GEMINI_API_KEY:
+            genai.configure(api_key=GEMINI_API_KEY)
+        else:
+            logging.getLogger(__name__).warning("GEMINI_API_KEY not found in environment.")
 
     def encode(self, texts, **kwargs):
         if isinstance(texts, str):
             texts = [texts]
         
-        if not self.keys:
-            logging.getLogger(__name__).warning("No Gemini API keys found.")
+        if not GEMINI_API_KEY:
+            logging.getLogger(__name__).warning("No Gemini API key found.")
             return np.zeros((len(texts), 768))
 
-        import time
-        max_retries = 2
-        
-        for attempt in range(max_retries):
-            # Try up to len(self.keys) times
-            for _ in range(len(self.keys)):
-                try:
-                    result = genai.embed_content(
-                        model=EMBED_MODEL,
-                        content=texts,
-                        task_type="retrieval_query"
-                    )
-                    return np.array(result['embedding'])
-                except Exception as e:
-                    err_str = str(e).lower()
-                    if "429" in err_str or "quota" in err_str or "limit" in err_str:
-                        logging.getLogger(__name__).warning(f"Rate limit hit for key {self.current_idx}. Rotating...")
-                        self.rotate()
-                        time.sleep(1)
-                    else:
-                        logging.getLogger(__name__).error(f"Gemini embed failed: {e}")
-                        return np.zeros((len(texts), 768))
-            
-            if attempt < max_retries - 1:
-                time.sleep(2)
-                
-        return np.zeros((len(texts), 768))
+        try:
+            result = genai.embed_content(
+                model=EMBED_MODEL,
+                content=texts,
+                task_type="retrieval_query"
+            )
+            return np.array(result['embedding'])
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Gemini embed failed: {e}")
+            return np.zeros((len(texts), 768))
 
 class GroqLLM:
     def __init__(self):
@@ -101,13 +73,13 @@ class GroqLLM:
             return ""
         try:
             response = self.client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="llama-3.1-8b-instant",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.3,
-                max_tokens=500
+                temperature=0.1,
+                max_tokens=300
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -338,8 +310,14 @@ class HybridRetriever:
             "hyde_activated": False,
         }
 
-        if fused and fused[0].get("rrf_score", 0) < 0.6:
-            logger.info("Low confidence — activating HyDE rescue")
+        # Skip HyDE if:
+        # 1. We have a high-confidence match (RRF > 0.55)
+        # 2. It's an exact IS number lookup (detected_is_numbers is not empty)
+        top_score = fused[0].get("rrf_score", 0) if fused else 0
+        is_lookup = bool(preprocessed["detected_is_numbers"])
+
+        if False:  # HyDE disabled for speed
+            logger.info(f"Low confidence ({top_score:.3f}) — activating HyDE rescue")
             hyde_results = self.hyde_rescue.rescue(query, fused)
             if hyde_results:
                 fused = self._weighted_rrf(
@@ -356,8 +334,8 @@ class HybridRetriever:
 
         return fused[:10]
 
-    def _dense_search(self, query: str, n_results: int = 15) -> List[Dict[str, Any]]:
-        """Search both ChromaDB collections and merge results."""
+    def _dense_search(self, query: str, n_results: int = 8) -> List[Dict[str, Any]]:
+        """Search ChromaDB collection and merge results."""
         query_embedding = self.embedder.encode(query).tolist()
 
         results = []
@@ -372,17 +350,6 @@ class HybridRetriever:
             results.extend(self._parse_chroma_results(text_results, "text"))
         except Exception as e:
             logger.error(f"standards_text search failed: {e}")
-
-        # Search standards_synthetic
-        try:
-            synth_results = self.synth_collection.query(
-                query_embeddings=[query_embedding],
-                n_results=min(n_results, self.synth_collection.count()),
-                include=["metadatas", "distances", "documents"],
-            )
-            results.extend(self._parse_chroma_results(synth_results, "synthetic"))
-        except Exception as e:
-            logger.error(f"standards_synthetic search failed: {e}")
 
         # Deduplicate by standard_number, keep highest score
         deduped = {}
@@ -427,7 +394,7 @@ class HybridRetriever:
 
         return parsed
 
-    def _sparse_search(self, query: str, n_results: int = 15) -> List[Dict[str, Any]]:
+    def _sparse_search(self, query: str, n_results: int = 8) -> List[Dict[str, Any]]:
         """BM25 sparse search over combined text fields."""
         tokenized_query = query.lower().split()
         scores = self.bm25.get_scores(tokenized_query)
@@ -568,13 +535,12 @@ class HyDERescue:
 
         try:
             prompt = (
-                f"Write a 2-sentence BIS SP21 standard summary that would match "
-                f"this product description: {query}\n"
-                f"Return only the summary text, nothing else."
+                f"Generate a 2-sentence BIS standard summary for: {query}\n"
+                f"Focus on technical requirements and material properties."
             )
             hypothetical_text = self.llm.generate(
                 prompt,
-                system_prompt="You are a BIS Standards expert. Generate hypothetical standard summaries."
+                system_prompt="You are a technical standards expert. Reply with summary only."
             )
             if not hypothetical_text:
                 return []

@@ -12,6 +12,8 @@ Produces the SAME outputs as ingest.py so retriever.py works unchanged:
 Usage:
     python vectorize.py --pdf pdf/BIS.pdf
     python vectorize.py --pdf pdf/BIS.pdf --skip-synthetic
+
+Only needed to vectorise the standards once.
 """
 
 import argparse
@@ -44,11 +46,7 @@ BM25_PATH = DATA_DIR / "bm25_index.pkl"
 WHITELIST_PATH = DATA_DIR / "standard_whitelist.json"
 METADATA_PATH = DATA_DIR / "standards_metadata.json"
 
-# Load Gemini API keys for rotation
-GEMINI_KEYS = [k for k in [os.getenv("GEMINI_API_KEY_1"), os.getenv("GEMINI_API_KEY_2")] if k]
-if not GEMINI_KEYS and os.getenv("GEMINI_API_KEY"):
-    GEMINI_KEYS = [os.getenv("GEMINI_API_KEY")]
-
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 EMBED_MODEL = "models/gemini-embedding-2"
 EMBED_DIM = 768  # gemini-embedding-2 is 768.
@@ -59,63 +57,30 @@ logger = logging.getLogger(__name__)
 
 # ─── Embedder ──────────────────────────────────────────────────────────
 
-class GeminiRotator:
-    def __init__(self, keys: List[str]):
-        self.keys = keys
-        self.current_idx = 0
-        self._configure_current()
-
-    def _configure_current(self):
-        if self.keys:
-            genai.configure(api_key=self.keys[self.current_idx])
-            logger.info(f"Configured Gemini with key index {self.current_idx}")
-
-    def rotate(self):
-        if len(self.keys) > 1:
-            self.current_idx = (self.current_idx + 1) % len(self.keys)
-            self._configure_current()
-
-    def embed(self, texts: List[str], task_type: str = "retrieval_document"):
-        if not self.keys:
-            logger.error("No Gemini API keys found.")
-            raise ValueError("GEMINI_API_KEY_1/2 is required for embeddings.")
-        
-        import time
-        max_retries = 3
-        
-        for attempt in range(max_retries):
-            # Try up to len(self.keys) times if we hit rate limits
-            for _ in range(len(self.keys)):
-                try:
-                    result = genai.embed_content(
-                        model=EMBED_MODEL,
-                        content=texts,
-                        task_type=task_type
-                    )
-                    return result['embedding']
-                except Exception as e:
-                    err_str = str(e).lower()
-                    if "429" in err_str or "quota" in err_str or "limit" in err_str:
-                        logger.warning(f"Rate limit hit for key {self.current_idx}. Rotating...")
-                        self.rotate()
-                        time.sleep(2) # Small delay after rotation
-                    else:
-                        logger.error(f"Gemini embed failed: {e}")
-                        raise
-            
-            logger.warning(f"All keys exhausted. Waiting 60 seconds (Attempt {attempt+1}/{max_retries})...")
-            time.sleep(60) # Wait a minute before trying again
-            
-        raise Exception("All Gemini API keys hit rate limits after multiple retries.")
-
-gemini_rotator = GeminiRotator(GEMINI_KEYS)
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
     """
-    Call Gemini API to get embeddings for a list of texts (with rotation).
+    Call Gemini API to get embeddings for a list of texts.
     """
-    return gemini_rotator.embed(texts)
+    if not texts:
+        return []
 
+    if not GEMINI_API_KEY:
+        logger.error("GEMINI_API_KEY not found in environment.")
+        raise ValueError("GEMINI_API_KEY is required for embeddings.")
+
+    try:
+        result = genai.embed_content(
+            model=EMBED_MODEL,
+            content=texts,
+            task_type="retrieval_document"
+        )
+        return result['embedding']
+    except Exception as e:
+        logger.error(f"Gemini embed failed: {e}")
+        raise
 
 def embed_texts_batched(texts: List[str], desc: str = "Embedding") -> List[List[float]]:
     """Embed in batches with a progress bar."""
@@ -132,10 +97,10 @@ def check_api_keys() -> None:
     if not GROQ_API_KEY:
         logger.error("GROQ_API_KEY is missing in .env file.")
         sys.exit(1)
-    if not GEMINI_KEYS:
-        logger.error("GEMINI_API_KEY_1/2 is missing in .env file (needed for embeddings).")
+    if not GEMINI_API_KEY:
+        logger.error("GEMINI_API_KEY is missing in .env file (needed for embeddings).")
         sys.exit(1)
-    logger.info(f"API keys found. Using Groq for LLM and {len(GEMINI_KEYS)} Gemini key(s) for embeddings.")
+    logger.info("API keys found. Using Groq for LLM and Gemini for embeddings.")
 
 
 
