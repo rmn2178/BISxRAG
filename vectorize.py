@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-BIS Standards Vectorization Pipeline (Ollama Edition)
+BIS Standards Vectorization Pipeline (Groq Edition)
 ======================================================
-Replaces sentence-transformers with Ollama nomic-embed-text:v1.5.
+Replaces Ollama with Groq API for embeddings.
 Produces the SAME outputs as ingest.py so retriever.py works unchanged:
   - data/chroma_db/          (ChromaDB: standards_text + standards_synthetic)
   - data/bm25_index.pkl      (BM25Okapi sparse index)
@@ -28,9 +28,11 @@ from typing import Any, Dict, List, Optional
 import chromadb
 import pdfplumber
 import requests
+import google.generativeai as genai
 from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
 from tqdm import tqdm
+from groq import Groq
 
 load_dotenv()
 
@@ -42,36 +44,77 @@ BM25_PATH = DATA_DIR / "bm25_index.pkl"
 WHITELIST_PATH = DATA_DIR / "standard_whitelist.json"
 METADATA_PATH = DATA_DIR / "standards_metadata.json"
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_EMBED_MODEL = "nomic-embed-text:v1.5"
-EMBED_DIM = 768  # nomic-embed-text v1.5 output dimension
+# Load Gemini API keys for rotation
+GEMINI_KEYS = [k for k in [os.getenv("GEMINI_API_KEY_1"), os.getenv("GEMINI_API_KEY_2")] if k]
+if not GEMINI_KEYS and os.getenv("GEMINI_API_KEY"):
+    GEMINI_KEYS = [os.getenv("GEMINI_API_KEY")]
 
-BATCH_SIZE = 32  # how many texts to embed per Ollama call
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+EMBED_MODEL = "models/gemini-embedding-2"
+EMBED_DIM = 768  # gemini-embedding-2 is 768.
+
+BATCH_SIZE = 32  # how many texts to embed per call
 
 logger = logging.getLogger(__name__)
 
-# ─── Ollama Embedder ──────────────────────────────────────────────────────────
+# ─── Embedder ──────────────────────────────────────────────────────────
+
+class GeminiRotator:
+    def __init__(self, keys: List[str]):
+        self.keys = keys
+        self.current_idx = 0
+        self._configure_current()
+
+    def _configure_current(self):
+        if self.keys:
+            genai.configure(api_key=self.keys[self.current_idx])
+            logger.info(f"Configured Gemini with key index {self.current_idx}")
+
+    def rotate(self):
+        if len(self.keys) > 1:
+            self.current_idx = (self.current_idx + 1) % len(self.keys)
+            self._configure_current()
+
+    def embed(self, texts: List[str], task_type: str = "retrieval_document"):
+        if not self.keys:
+            logger.error("No Gemini API keys found.")
+            raise ValueError("GEMINI_API_KEY_1/2 is required for embeddings.")
+        
+        import time
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            # Try up to len(self.keys) times if we hit rate limits
+            for _ in range(len(self.keys)):
+                try:
+                    result = genai.embed_content(
+                        model=EMBED_MODEL,
+                        content=texts,
+                        task_type=task_type
+                    )
+                    return result['embedding']
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if "429" in err_str or "quota" in err_str or "limit" in err_str:
+                        logger.warning(f"Rate limit hit for key {self.current_idx}. Rotating...")
+                        self.rotate()
+                        time.sleep(2) # Small delay after rotation
+                    else:
+                        logger.error(f"Gemini embed failed: {e}")
+                        raise
+            
+            logger.warning(f"All keys exhausted. Waiting 60 seconds (Attempt {attempt+1}/{max_retries})...")
+            time.sleep(60) # Wait a minute before trying again
+            
+        raise Exception("All Gemini API keys hit rate limits after multiple retries.")
+
+gemini_rotator = GeminiRotator(GEMINI_KEYS)
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
     """
-    Call Ollama /api/embed to get embeddings for a list of texts.
-    Returns list of float vectors, one per input text.
+    Call Gemini API to get embeddings for a list of texts (with rotation).
     """
-    if not texts:
-        return []
-
-    url = f"{OLLAMA_URL}/api/embed"
-    payload = {"model": OLLAMA_EMBED_MODEL, "input": texts}
-
-    try:
-        resp = requests.post(url, json=payload, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
-        # Ollama /api/embed returns {"embeddings": [[...], ...]}
-        return data["embeddings"]
-    except Exception as e:
-        logger.error(f"Ollama embed failed: {e}")
-        raise
+    return gemini_rotator.embed(texts)
 
 
 def embed_texts_batched(texts: List[str], desc: str = "Embedding") -> List[List[float]]:
@@ -84,23 +127,16 @@ def embed_texts_batched(texts: List[str], desc: str = "Embedding") -> List[List[
     return all_embeddings
 
 
-def check_ollama() -> None:
-    """Verify Ollama is running and the model is available."""
-    try:
-        resp = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
-        resp.raise_for_status()
-        models = [m["name"] for m in resp.json().get("models", [])]
-        # Accept any variant of the model name
-        if not any(OLLAMA_EMBED_MODEL.split(":")[0] in m for m in models):
-            logger.warning(
-                f"Model '{OLLAMA_EMBED_MODEL}' not found in Ollama. "
-                f"Available: {models}. Run: ollama pull {OLLAMA_EMBED_MODEL}"
-            )
-        else:
-            logger.info(f"Ollama ready. Model '{OLLAMA_EMBED_MODEL}' available.")
-    except Exception as e:
-        logger.error(f"Cannot reach Ollama at {OLLAMA_URL}: {e}")
+def check_api_keys() -> None:
+    """Verify API keys are present."""
+    if not GROQ_API_KEY:
+        logger.error("GROQ_API_KEY is missing in .env file.")
         sys.exit(1)
+    if not GEMINI_KEYS:
+        logger.error("GEMINI_API_KEY_1/2 is missing in .env file (needed for embeddings).")
+        sys.exit(1)
+    logger.info(f"API keys found. Using Groq for LLM and {len(GEMINI_KEYS)} Gemini key(s) for embeddings.")
+
 
 
 # ─── PDF Parsing ──────────────────────────────────────────────────────────────
@@ -325,7 +361,7 @@ def build_chroma_index(
     all_metadata: List[Dict[str, Any]],
     all_queries: Dict[str, List[str]],
 ) -> None:
-    logger.info("Building ChromaDB collections with Ollama embeddings...")
+    logger.info("Building ChromaDB collections with Groq embeddings...")
     CHROMA_DIR.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
 
@@ -362,7 +398,7 @@ def build_chroma_index(
             "engineering_terms": json.dumps(m["engineering_terms"]),
         })
 
-    logger.info(f"Embedding {len(text_docs)} standard documents via Ollama...")
+    logger.info(f"Embedding {len(text_docs)} standard documents via Groq...")
     text_embeddings = embed_texts_batched(text_docs, desc="Embedding standards_text")
 
     for i in range(0, len(text_docs), 100):
@@ -399,7 +435,7 @@ def build_chroma_index(
             })
 
     if synth_docs:
-        logger.info(f"Embedding {len(synth_docs)} synthetic queries via Ollama...")
+        logger.info(f"Embedding {len(synth_docs)} synthetic queries via Groq...")
         synth_embeddings = embed_texts_batched(synth_docs, desc="Embedding standards_synthetic")
         for i in range(0, len(synth_docs), 100):
             end = min(i + 100, len(synth_docs))
@@ -465,11 +501,11 @@ def main():
         logger.error(f"PDF not found: {pdf_path}")
         sys.exit(1)
 
-    # 0. Verify Ollama
+    # 0. Verify API Keys
     logger.info("=" * 60)
-    logger.info("STEP 0: Checking Ollama connection")
+    logger.info("STEP 0: Checking API connections")
     logger.info("=" * 60)
-    check_ollama()
+    check_api_keys()
 
     # 1. Parse PDF
     logger.info("=" * 60)

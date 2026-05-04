@@ -21,6 +21,7 @@ import requests
 import chromadb
 import numpy as np
 from dotenv import load_dotenv
+from groq import Groq
 
 load_dotenv()
 
@@ -30,22 +31,88 @@ CHROMA_DIR = DATA_DIR / "chroma_db"
 BM25_PATH = DATA_DIR / "bm25_index.pkl"
 WHITELIST_PATH = DATA_DIR / "standard_whitelist.json"
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_EMBED_MODEL = "nomic-embed-text:v1.5"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_KEYS = [k for k in [os.getenv("GEMINI_API_KEY_1"), os.getenv("GEMINI_API_KEY_2")] if k]
+if not GEMINI_KEYS and os.getenv("GEMINI_API_KEY"):
+    GEMINI_KEYS = [os.getenv("GEMINI_API_KEY")]
 
-class OllamaEmbedder:
+EMBED_MODEL = "models/gemini-embedding-2"
+
+class GeminiEmbedder:
+    def __init__(self):
+        self.keys = GEMINI_KEYS
+        self.current_idx = 0
+        self._configure_current()
+
+    def _configure_current(self):
+        if self.keys:
+            genai.configure(api_key=self.keys[self.current_idx])
+            logging.getLogger(__name__).info(f"Configured Gemini with key index {self.current_idx}")
+
+    def rotate(self):
+        if len(self.keys) > 1:
+            self.current_idx = (self.current_idx + 1) % len(self.keys)
+            self._configure_current()
+
     def encode(self, texts, **kwargs):
         if isinstance(texts, str):
             texts = [texts]
-        url = f"{OLLAMA_URL}/api/embed"
-        payload = {"model": OLLAMA_EMBED_MODEL, "input": texts}
-        try:
-            resp = requests.post(url, json=payload, timeout=30)
-            resp.raise_for_status()
-            return np.array(resp.json()["embeddings"])
-        except Exception as e:
-            logger.error(f"Ollama embed failed: {e}")
+        
+        if not self.keys:
+            logging.getLogger(__name__).warning("No Gemini API keys found.")
             return np.zeros((len(texts), 768))
+
+        import time
+        max_retries = 2
+        
+        for attempt in range(max_retries):
+            # Try up to len(self.keys) times
+            for _ in range(len(self.keys)):
+                try:
+                    result = genai.embed_content(
+                        model=EMBED_MODEL,
+                        content=texts,
+                        task_type="retrieval_query"
+                    )
+                    return np.array(result['embedding'])
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if "429" in err_str or "quota" in err_str or "limit" in err_str:
+                        logging.getLogger(__name__).warning(f"Rate limit hit for key {self.current_idx}. Rotating...")
+                        self.rotate()
+                        time.sleep(1)
+                    else:
+                        logging.getLogger(__name__).error(f"Gemini embed failed: {e}")
+                        return np.zeros((len(texts), 768))
+            
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                
+        return np.zeros((len(texts), 768))
+
+class GroqLLM:
+    def __init__(self):
+        self.client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+        if not self.client:
+            logging.getLogger(__name__).warning("GROQ_API_KEY not found in environment.")
+
+    def generate(self, prompt: str, system_prompt: str = "You are a helpful assistant.") -> str:
+        if not self.client:
+            return ""
+        try:
+            response = self.client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=500
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Groq generation failed: {e}")
+            return ""
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +259,7 @@ class HybridRetriever:
         logger.info("Initializing HybridRetriever...")
 
         # Load embedder
-        self.embedder = OllamaEmbedder()
+        self.embedder = GeminiEmbedder()
 
         # Load ChromaDB
         self.chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
@@ -481,17 +548,12 @@ class HyDERescue:
 
     def __init__(
         self,
-        embedder: OllamaEmbedder,
+        embedder: GeminiEmbedder,
         text_collection: chromadb.Collection,
     ):
         self.embedder = embedder
         self.text_collection = text_collection
-        self.client = None
-
-        api_key = os.getenv("GEMINI_API_KEY")
-        if api_key:
-            genai.configure(api_key=api_key)
-            self.client = genai.GenerativeModel("gemini-2.5-flash")
+        self.llm = GroqLLM()
 
     def rescue(
         self, query: str, existing_candidates: List[Dict[str, Any]]
@@ -500,8 +562,8 @@ class HyDERescue:
         Generate a hypothetical BIS standard summary, embed it,
         and do a second dense pass to find missed standards.
         """
-        if self.client is None:
-            logger.warning("No API key — HyDE rescue skipped")
+        if not GROQ_API_KEY:
+            logger.warning("No Groq API key — HyDE rescue skipped")
             return []
 
         try:
@@ -510,11 +572,12 @@ class HyDERescue:
                 f"this product description: {query}\n"
                 f"Return only the summary text, nothing else."
             )
-            response = self.client.generate_content(
+            hypothetical_text = self.llm.generate(
                 prompt,
-                generation_config={"temperature": 0.3, "max_output_tokens": 200},
+                system_prompt="You are a BIS Standards expert. Generate hypothetical standard summaries."
             )
-            hypothetical_text = response.text.strip()
+            if not hypothetical_text:
+                return []
 
             logger.info(f"HyDE generated: {hypothetical_text[:100]}...")
 
